@@ -454,33 +454,6 @@ static void dump_config(const Config *c) {
         "  \"p0\": %.17g,\n  \"perturbation_amp\": %.17g,\n"
         "  \"seed\": %d,\n"
         "  \"scheme\": \"%s\",\n  \"cfl\": %.17g,\n"
-        "  \"k1_coef\": %.17g,\n  \"k2_coef\": %.17g,\n  \"k3_coef\": %.17g,\n"
-        "  \"steps\": %s,\n  \"t_end\": %s,\n"
-        "  \"save_interval\": %d,\n"
-        "  \"output_dir\": \"%s\",\n"
-        "  \"no_output\": %s,\n  \"overwrite\": %s,\n"
-        "  \"warmup_steps\": %d,\n  \"repeats\": %d\n"
-        "}\n",
-        c->Nx, c->Ny, c->Lx, c->Ly, c->gamma, c->g,
-        c->rho_heavy, c->rho_light, c->p0, c->perturbation_amp, c->seed,
-        c->scheme, c->cfl, c->k1_coef, c->k2_coef, c->k3_coef,
-        (c->steps < 0 ? "null" : (snprintf(NULL,0,"%ld",c->steps), "STEPS")),
-        (isnan(c->t_end) ? "null" : "TEND"),
-        c->save_interval, c->output_dir,
-        c->no_output ? "true" : "false", c->overwrite ? "true" : "false",
-        c->warmup_steps, c->repeats);
-    fclose(fp);
-    /* re-render with actual numeric values for steps/t_end */
-    fp = fopen(path, "w");
-    fprintf(fp,
-        "{\n"
-        "  \"Nx\": %d,\n  \"Ny\": %d,\n"
-        "  \"Lx\": %.17g,\n  \"Ly\": %.17g,\n"
-        "  \"gamma\": %.17g,\n  \"g\": %.17g,\n"
-        "  \"rho_heavy\": %.17g,\n  \"rho_light\": %.17g,\n"
-        "  \"p0\": %.17g,\n  \"perturbation_amp\": %.17g,\n"
-        "  \"seed\": %d,\n"
-        "  \"scheme\": \"%s\",\n  \"cfl\": %.17g,\n"
         "  \"k1_coef\": %.17g,\n  \"k2_coef\": %.17g,\n  \"k3_coef\": %.17g,\n",
         c->Nx, c->Ny, c->Lx, c->Ly, c->gamma, c->g,
         c->rho_heavy, c->rho_light, c->p0, c->perturbation_amp, c->seed,
