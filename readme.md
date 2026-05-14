@@ -3,7 +3,7 @@
 A 2D compressible-Euler simulation of the Rayleigh-Taylor instability, implemented three ways, Python, C, and CUDA, for comparison.
 
 <div align="center">
-  <img src="rayleigh_taylor_instability_512x1024.gif" width="300" alt="Rayleigh-Taylor Instability Evolution">
+  <img src="assets/rayleigh_taylor_instability_512x1024.gif" width="300" alt="Rayleigh-Taylor Instability Evolution">
   <p><em>Density field evolution on a 512×1024 grid, the characteristic mushroom structures of the Rayleigh-Taylor instability.</em></p>
 </div>
 
