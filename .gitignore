@@ -1,0 +1,6 @@
+results/
+.venv/
+__pycache__/
+.ipynb_checkpoints/
+src/c/run
+src/cuda/run
