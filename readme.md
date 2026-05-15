@@ -70,6 +70,16 @@ python scripts/animate.py    results/c_256x512_t2
 
 All three runners accept the same flags; run `--help` for the full list.
 
+## Benchmarks
+
+On a 256×512 grid the CUDA runner reaches ~60 M cell-updates/s, a ~29× speedup
+over the Python baseline; the C port alone gives ~2.3×. CUDA throughput stays
+roughly flat as the grid grows, while the CPU runners lose ground once the
+working set spills out of cache.
+
+See [`docs/benchmarks.md`](docs/benchmarks.md) for the full results table,
+methodology, hardware specs, and plots.
+
 ## License
 
 MIT - see [LICENSE](LICENSE).
