@@ -15,6 +15,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <time.h>
@@ -67,7 +68,7 @@ static void cfg_defaults(Config *c) {
     c->save_interval = 0;
     strcpy(c->output_dir, "results/run");
     c->no_output = 0; c->overwrite = 0;
-    c->warmup_steps = 10; c->repeats = 1;
+    c->warmup_steps = 0; c->repeats = 1;
     c->block_x = 16; c->block_y = 16;
 }
 
@@ -595,49 +596,114 @@ int main(int argc, char **argv) {
     Config c; cfg_defaults(&c);
     if (parse_args(argc, argv, &c) != 0) return 1;
 
-    if (!c.no_output) {
+    int bench_mode = (c.warmup_steps > 0) || (c.repeats > 1);
+    if (c.repeats < 1) c.repeats = 1;
+
+    if (!bench_mode && !c.no_output) {
         if (prepare_output_dir(&c) != 0) return 1;
         dump_config(&c);
     }
 
+    size_t gpu_free_before = 0, gpu_total = 0;
+    cudaCheck(cudaMemGetInfo(&gpu_free_before, &gpu_total));
+
     DState s; dstate_alloc(&s, &c);
+
+    size_t gpu_free_after = 0;
+    cudaCheck(cudaMemGetInfo(&gpu_free_after, &gpu_total));
+    double gpu_mem_mb = (double)(gpu_free_before - gpu_free_after) / (1024.0 * 1024.0);
 
     dim3 bd = block_dim(&c), gd = grid_full(&c);
     double dy = c.Ly / c.Ny;
-    initialize_grid_kernel<<<gd, bd>>>(s.r, s.ru, s.rv, s.e, s.p,
-                                       c.Nx, c.Ny, c.Ly, dy,
-                                       c.rho_heavy, c.rho_light, c.p0, c.g,
-                                       c.perturbation_amp, c.gamma, (unsigned int)c.seed);
-    cudaCheckLast();
-    apply_bc_kernel<<<gd, bd>>>(s.r, s.ru, s.rv, s.e, s.p, c.Nx, c.Ny, c.gamma);
-    cudaCheck(cudaDeviceSynchronize());
 
-    double t = 0.0;
-    long step_idx = 0;
-    if (c.save_interval && !c.no_output) write_frame(&c, &s, step_idx, t);
+    double *wall_times = (double*)calloc((size_t)c.repeats, sizeof(double));
+    if (!wall_times) { fprintf(stderr, "OOM\n"); return 1; }
+    long timed_steps = 0;
 
-    struct timespec t0, t1;
-    clock_gettime(CLOCK_MONOTONIC, &t0);
-    for (;;) {
-        if (c.steps >= 0 && step_idx >= c.steps) break;
-        if (!isnan(c.t_end) && t >= c.t_end) break;
-        double dt = host_compute_dt(&c, &s);
-        if (!isnan(c.t_end) && t + dt > c.t_end) dt = c.t_end - t;
-        host_step(&c, &s, dt);
-        t += dt;
-        step_idx++;
-        if (c.save_interval && !c.no_output && step_idx % c.save_interval == 0) {
-            cudaCheck(cudaDeviceSynchronize());
+    for (int rep = 0; rep < c.repeats; rep++) {
+        initialize_grid_kernel<<<gd, bd>>>(s.r, s.ru, s.rv, s.e, s.p,
+                                           c.Nx, c.Ny, c.Ly, dy,
+                                           c.rho_heavy, c.rho_light, c.p0, c.g,
+                                           c.perturbation_amp, c.gamma, (unsigned int)c.seed);
+        cudaCheckLast();
+        apply_bc_kernel<<<gd, bd>>>(s.r, s.ru, s.rv, s.e, s.p, c.Nx, c.Ny, c.gamma);
+        cudaCheck(cudaDeviceSynchronize());
+
+        double t = 0.0;
+        long step_idx = 0;
+        if (!bench_mode && c.save_interval && !c.no_output)
             write_frame(&c, &s, (int)step_idx, t);
-            printf("step %ld  t=%.4f  dt=%.4e\n", step_idx, t, dt);
-            fflush(stdout);
+
+        /* warmup (untimed) */
+        for (int w = 0; w < c.warmup_steps; w++) {
+            double dt = host_compute_dt(&c, &s);
+            if (!isnan(c.t_end) && t + dt > c.t_end) dt = c.t_end - t;
+            host_step(&c, &s, dt);
+            t += dt; step_idx++;
+        }
+        cudaCheck(cudaDeviceSynchronize());
+
+        /* timed */
+        struct timespec t0, t1;
+        clock_gettime(CLOCK_MONOTONIC, &t0);
+        long target = (c.steps >= 0) ? c.steps + c.warmup_steps : -1;
+        for (;;) {
+            if (target >= 0 && step_idx >= target) break;
+            if (!isnan(c.t_end) && t >= c.t_end) break;
+            double dt = host_compute_dt(&c, &s);
+            if (!isnan(c.t_end) && t + dt > c.t_end) dt = c.t_end - t;
+            host_step(&c, &s, dt);
+            t += dt; step_idx++;
+            if (!bench_mode && c.save_interval && !c.no_output
+                && step_idx % c.save_interval == 0) {
+                cudaCheck(cudaDeviceSynchronize());
+                write_frame(&c, &s, (int)step_idx, t);
+                printf("step %ld  t=%.4f  dt=%.4e\n", step_idx, t, dt);
+                fflush(stdout);
+            }
+        }
+        cudaCheck(cudaDeviceSynchronize());
+        clock_gettime(CLOCK_MONOTONIC, &t1);
+        wall_times[rep] = (t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec) / 1e9;
+        timed_steps = step_idx - c.warmup_steps;
+    }
+
+    /* sort wall_times */
+    for (int i = 0; i < c.repeats - 1; i++) {
+        for (int j = 0; j < c.repeats - 1 - i; j++) {
+            if (wall_times[j] > wall_times[j + 1]) {
+                double tmp = wall_times[j];
+                wall_times[j] = wall_times[j + 1];
+                wall_times[j + 1] = tmp;
+            }
         }
     }
-    cudaCheck(cudaDeviceSynchronize());
-    clock_gettime(CLOCK_MONOTONIC, &t1);
-    double wall = (t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec) / 1e9;
-    printf("done: %ld steps in %.2fs (%.1f steps/s, %.2e cell-updates/s)\n",
-           step_idx, wall, step_idx / wall,
-           (double)c.Nx * c.Ny * step_idx / wall);
+    double median_wall = wall_times[c.repeats / 2];
+
+    struct rusage ru;
+    getrusage(RUSAGE_SELF, &ru);
+    double peak_rss_mb = ru.ru_maxrss / 1024.0;
+
+    double steps_per_s = median_wall > 0 ? (double)timed_steps / median_wall : 0.0;
+    double cu_per_s = median_wall > 0 ? (double)c.Nx * c.Ny * timed_steps / median_wall : 0.0;
+
+    if (!bench_mode) {
+        printf("done: %ld steps in %.2fs (%.1f steps/s, %.2e cell-updates/s)\n",
+               timed_steps, median_wall, steps_per_s, cu_per_s);
+    }
+
+    printf("{\"impl\":\"cuda\",\"Nx\":%d,\"Ny\":%d,\"scheme\":\"%s\",\"seed\":%d,"
+           "\"warmup_steps\":%d,\"repeats\":%d,\"timed_steps\":%ld,"
+           "\"block_x\":%d,\"block_y\":%d,"
+           "\"wall_s_median\":%.17g,\"wall_s_all\":[",
+           c.Nx, c.Ny, c.scheme, c.seed, c.warmup_steps, c.repeats,
+           timed_steps, c.block_x, c.block_y, median_wall);
+    for (int i = 0; i < c.repeats; i++) {
+        printf(i == 0 ? "%.17g" : ",%.17g", wall_times[i]);
+    }
+    printf("],\"steps_per_s\":%.17g,\"cell_updates_per_s\":%.17g,"
+           "\"peak_rss_mb\":%.17g,\"gpu_mem_mb\":%.17g}\n",
+           steps_per_s, cu_per_s, peak_rss_mb, gpu_mem_mb);
+    free(wall_times);
     return 0;
 }

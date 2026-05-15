@@ -40,10 +40,10 @@ class Config:
     overwrite: bool = False  # allow writing into an existing output_dir
 
     # Benchmark
-    # TODO: wire these into the time loop for the metrics phase
-    # warmup_steps: steps to run before starting the timer (excludes startup costs)
-    # repeats: number of times to re-run the timed section, reporting the median
-    warmup_steps: int = 10
+    # warmup_steps: steps run before the timer starts (excludes startup costs)
+    # repeats: re-runs of the timed section; median wall time is reported
+    # Bench mode is implicit: triggered when warmup_steps > 0 OR repeats > 1
+    warmup_steps: int = 0
     repeats: int = 1
 
     # Impl-specific (CUDA)
@@ -107,7 +107,7 @@ def add_shared_args(p: argparse.ArgumentParser) -> None:
     )
 
     b = p.add_argument_group("benchmark")
-    b.add_argument("--warmup-steps", type=int, default=10, dest="warmup_steps")
+    b.add_argument("--warmup-steps", type=int, default=0, dest="warmup_steps")
     b.add_argument("--repeats", type=int, default=1)
 
 

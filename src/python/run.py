@@ -8,6 +8,8 @@ and wall-y boundary conditions. CLI flags are defined in src/common/cli_spec.py.
 from __future__ import annotations
 
 import argparse
+import json
+import resource
 import sys
 import time
 from pathlib import Path
@@ -186,57 +188,97 @@ def prepare_output_dir(cfg: Config) -> Path:
     return out_dir
 
 
+def _advance_one(cfg: Config, state, dx, dy):
+    r, ru, rv, e, p, t = state
+    dt = compute_dt(cfg, r, ru, rv, p, dx, dy)
+    if cfg.t_end is not None and t + dt > cfg.t_end:
+        dt = cfg.t_end - t
+    r, ru, rv, e, p = step(cfg, r, ru, rv, e, p, dt, dx, dy)
+    return (r, ru, rv, e, p, t + dt), dt
+
+
 def run(cfg: Config) -> None:
     validate(cfg)
-    rng = np.random.default_rng(cfg.seed)
+    bench_mode = cfg.warmup_steps > 0 or cfg.repeats > 1
+
     dx = cfg.Lx / cfg.Nx
     dy = cfg.Ly / cfg.Ny
 
-    if not cfg.no_output:
+    if not bench_mode and not cfg.no_output:
         out_dir = prepare_output_dir(cfg)
         dump_config(cfg, out_dir / "config.json")
     else:
         out_dir = None
 
-    r, ru, rv, e, p = initialize_grid(cfg, rng)
-    r, ru, rv, e, p = apply_bc(cfg, r, ru, rv, e, p)
+    wall_times = []
+    timed_steps = 0
 
-    t = 0.0
-    step_idx = 0
-    if cfg.save_interval and out_dir is not None:
-        write_frame(out_dir / f"frame_{step_idx:06d}.bin", step_idx, t, r, ru, rv, e)
+    for _ in range(cfg.repeats):
+        rng = np.random.default_rng(cfg.seed)
+        r, ru, rv, e, p = initialize_grid(cfg, rng)
+        r, ru, rv, e, p = apply_bc(cfg, r, ru, rv, e, p)
+        t = 0.0
+        step_idx = 0
+        state = (r, ru, rv, e, p, t)
 
-    wall_start = time.perf_counter()
-    while True:
-        if cfg.steps is not None and step_idx >= cfg.steps:
-            break
-        if cfg.t_end is not None and t >= cfg.t_end:
-            break
+        if cfg.save_interval and out_dir is not None:
+            write_frame(out_dir / f"frame_{step_idx:06d}.bin", step_idx, t, *state[:4])
 
-        dt = compute_dt(cfg, r, ru, rv, p, dx, dy)
-        if cfg.t_end is not None and t + dt > cfg.t_end:
-            dt = cfg.t_end - t
+        # Warmup (untimed)
+        for _w in range(cfg.warmup_steps):
+            state, _ = _advance_one(cfg, state, dx, dy)
+            step_idx += 1
 
-        r, ru, rv, e, p = step(cfg, r, ru, rv, e, p, dt, dx, dy)
-        t += dt
-        step_idx += 1
+        # Timed section
+        wall_start = time.perf_counter()
+        target_steps = cfg.steps + cfg.warmup_steps if cfg.steps is not None else None
+        while True:
+            if target_steps is not None and step_idx >= target_steps:
+                break
+            if cfg.t_end is not None and state[5] >= cfg.t_end:
+                break
+            state, dt = _advance_one(cfg, state, dx, dy)
+            step_idx += 1
+            if (
+                cfg.save_interval
+                and out_dir is not None
+                and step_idx % cfg.save_interval == 0
+            ):
+                r, ru, rv, e, _p, t = state
+                write_frame(
+                    out_dir / f"frame_{step_idx:06d}.bin", step_idx, t, r, ru, rv, e
+                )
+                print(f"step {step_idx}  t={t:.4f}  dt={dt:.4e}", flush=True)
+        wall_times.append(time.perf_counter() - wall_start)
+        timed_steps = step_idx - cfg.warmup_steps
 
-        if (
-            cfg.save_interval
-            and out_dir is not None
-            and step_idx % cfg.save_interval == 0
-        ):
-            write_frame(
-                out_dir / f"frame_{step_idx:06d}.bin", step_idx, t, r, ru, rv, e
-            )
-            print(f"step {step_idx}  t={t:.4f}  dt={dt:.4e}", flush=True)
-
-    wall = time.perf_counter() - wall_start
-    print(
-        f"done: {step_idx} steps in {wall:.2f}s "
-        f"({step_idx / wall:.1f} steps/s, "
-        f"{cfg.Nx * cfg.Ny * step_idx / wall:.2e} cell-updates/s)"
-    )
+    wall_times.sort()
+    median_wall = wall_times[len(wall_times) // 2]
+    peak_rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0
+    stats = {
+        "impl": "python",
+        "Nx": cfg.Nx,
+        "Ny": cfg.Ny,
+        "scheme": cfg.scheme,
+        "seed": cfg.seed,
+        "warmup_steps": cfg.warmup_steps,
+        "repeats": cfg.repeats,
+        "timed_steps": timed_steps,
+        "wall_s_median": median_wall,
+        "wall_s_all": wall_times,
+        "steps_per_s": timed_steps / median_wall if median_wall > 0 else 0.0,
+        "cell_updates_per_s": (
+            cfg.Nx * cfg.Ny * timed_steps / median_wall if median_wall > 0 else 0.0
+        ),
+        "peak_rss_mb": peak_rss_mb,
+    }
+    if not bench_mode:
+        print(
+            f"done: {timed_steps} steps in {median_wall:.2f}s "
+            f"({stats['steps_per_s']:.1f} steps/s, "
+            f"{stats['cell_updates_per_s']:.2e} cell-updates/s)"
+        )
+    print(json.dumps(stats), flush=True)
 
 
 def main() -> None:
